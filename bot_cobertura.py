@@ -10,12 +10,15 @@ from telebot import types
 
 TOKEN = "8621312939:AAGurzTO0_zfKSXYoHNVFwQnSWDWQOjoKTc"
 DB_POSTES = "posteria_optimizada.db"
-RADIO_MAXIMO_METROS = 400  # Límite comercial de factibilidad
+
+# Parámetros de calibración comercial
+DISTANCIA_OPTIMA = 150   # Cobertura directa
+DISTANCIA_LIMITE = 400   # Límite máximo para estudio técnico
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=10)
 
 def obtener_geodireccion(lat, lon):
-    """Obtiene provincia, cantón, distrito, barrio y dirección en tiempo real."""
+    """Obtiene dirección territorial en Costa Rica mediante OpenStreetMap."""
     url = f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat}&lon={lon}&addressdetails=1"
     headers = {"User-Agent": "CoberturaCR_TelegramBot/1.0"}
     try:
@@ -23,11 +26,10 @@ def obtener_geodireccion(lat, lon):
         if r.status_code == 200:
             addr = r.json().get("address", {})
             
-            provincia = addr.get("state") or addr.get("region") or "N/D"
+            provincia = addr.get("state") or addr.get("region") or "San José"
             canton = addr.get("county") or addr.get("municipality") or addr.get("city") or "N/D"
             distrito = addr.get("city_district") or addr.get("suburb") or addr.get("town") or addr.get("village") or "N/D"
             
-            # Identificar barrio, residencial, condominio o vecindario
             barrio = (
                 addr.get("neighbourhood") or 
                 addr.get("residential") or 
@@ -36,10 +38,9 @@ def obtener_geodireccion(lat, lon):
                 "No especificado en mapa"
             )
             
-            # Calle / Dirección de referencia
             calle = addr.get("road") or addr.get("pedestrian") or addr.get("path") or ""
             numero = addr.get("house_number") or ""
-            direccion = f"{calle} {numero}".strip() if calle else "Calle sin nombre / Vía pública"
+            direccion = f"{calle} {numero}".strip() if calle else "Vía pública / Sin nombre registrado"
             
             return {
                 "provincia": provincia,
@@ -60,7 +61,7 @@ def obtener_geodireccion(lat, lon):
     }
 
 def inicializar_desde_zip():
-    """Extrae el KML desde el ZIP e indexa la red de postes."""
+    """Crea la base de datos indexada en SQLite a partir del KML."""
     if os.path.exists(DB_POSTES):
         print("✅ Base de datos SQLite detectada y lista.")
         return
@@ -144,7 +145,7 @@ def consultar_cobertura(lat_user, lon_user):
     conn = sqlite3.connect(DB_POSTES)
     c = conn.cursor()
     
-    delta = 0.0055
+    delta = 0.006
     c.execute("SELECT codigo, lat, lon FROM postes WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
               (lat_user - delta, lat_user + delta, lon_user - delta, lon_user + delta))
     candidatos = c.fetchall()
@@ -172,58 +173,59 @@ def consultar_cobertura(lat_user, lon_user):
                 "lat": lat,
                 "lon": lon,
                 "distancia": round(d, 1),
-                "cobertura": d <= RADIO_MAXIMO_METROS,
                 "encontrado": True
             }
 
     return mejor_poste
 
-def responder_consulta(chat_id, lat, lon):
+def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
     res = consultar_cobertura(lat, lon)
     if not res:
-        bot.send_message(chat_id, "⚠️ Base de datos en mantenimiento. Por favor reintenta.")
+        bot.send_message(chat_id, "⚠️ El validador se está iniciando. Por favor reintenta en breve.", reply_to_message_id=reply_to_message_id)
         return
 
     if not res["encontrado"]:
         bot.send_message(
             chat_id,
-            f"❌ <b>NO APLICA - SIN COBERTURA</b>\n\nNo se localizó infraestructura cercana a las coordenadas (<code>{lat:.5f}, {lon:.5f}</code>).",
-            parse_mode="HTML"
+            f"🔴 <b>NO APLICA - SIN RED CERCANA</b>\n\nNo se localizó infraestructura de red cercana al punto (<code>{lat:.6f}, {lon:.6f}</code>).",
+            parse_mode="HTML",
+            reply_to_message_id=reply_to_message_id
         )
         return
 
-    # Geocodificación inversa para dirección territorial real
-    geo = obtener_geodireccion(lat, lon)
     dist = res["distancia"]
+    geo = obtener_geodireccion(lat, lon)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat},{lon}&destination={res['lat']},{res['lon']}"
 
-    if res["cobertura"]:
-        estado_header = "✅ <b>FACTIBILIDAD: APLICA</b>"
-        estado_badge = "🟢 <b>CON COBERTURA COMERCIAL</b>"
-        obs = f"El punto consultado está dentro del rango permitido (≤ {RADIO_MAXIMO_METROS} m)."
+    # Lógica de estados según estándar empresarial
+    if dist <= DISTANCIA_OPTIMA:
+        badge = "🟢 <b>FACTIBLE: APLICA</b>"
+        estado_desc = "Factibilidad directa. Dentro de la zona óptima de servicio."
+    elif dist <= DISTANCIA_LIMITE:
+        badge = "🟠 <b>AL BORDE: REQUIERE ESTUDIO</b>"
+        estado_desc = "Está a más de 150m de la red. Hace falta el estudio técnico para confirmarlo."
     else:
-        estado_header = "❌ <b>FACTIBILIDAD: NO APLICA</b>"
-        estado_badge = "🔴 <b>FUERA DE RANGO MÁXIMO</b>"
-        obs = f"Supera la distancia máxima autorizada de {RADIO_MAXIMO_METROS} m."
+        badge = "🔴 <b>NO APLICA: FUERA DE RANGO</b>"
+        estado_desc = f"Supera la distancia máxima autorizada de {DISTANCIA_LIMITE} metros."
 
     tarjeta = (
-        f"{estado_header}\n"
-        f"{estado_badge}\n\n"
-        f"📏 <b>Distancia al poste:</b> <b>{dist} metros</b> (Límite: {RADIO_MAXIMO_METROS}m)\n"
-        f"🏷 <b>Poste / NAP más cercano:</b> <code>{res['codigo']}</code>\n\n"
-        f"📍 <b>Dirección y Ubicación Territorial:</b>\n"
+        f"{badge}\n\n"
+        f"📏 <b>Distancia a la red:</b> <b>{dist} metros</b>\n"
+        f"🏷 <b>Poste / NAP:</b> <code>{res['codigo']}</code>\n\n"
+        f"📍 <b>Ubicación Territorial:</b>\n"
         f"• <b>Provincia:</b> {geo['provincia']}\n"
         f"• <b>Cantón:</b> {geo['canton']}\n"
         f"• <b>Distrito:</b> {geo['distrito']}\n"
         f"• <b>Barrio / Condominio:</b> {geo['barrio']}\n"
-        f"• <b>Dirección / Vía:</b> {geo['direccion']}\n"
-        f"• <b>Coordenadas cliente:</b> <code>{lat:.5f}, {lon:.5f}</code>\n\n"
-        f"ℹ️ <b>Diagnóstico:</b> {obs}"
+        f"• <b>Vía / Calle:</b> {geo['direccion']}\n"
+        f"• <b>Punto consultado:</b> <code>{lat:.6f}, {lon:.6f}</code>\n\n"
+        f"ℹ️ <b>Diagnóstico:</b> {estado_desc}\n"
+        f"<i>Nota: La distancia es lineal al poste más próximo.</i>"
     )
 
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🗺 Ver ruta al poste en Google Maps", url=link_maps))
-    bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup)
+    bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup, reply_to_message_id=reply_to_message_id)
 
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(message):
@@ -231,30 +233,34 @@ def cmd_start(message):
         message,
         f"👋 ¡Hola, {message.from_user.first_name}!\n\n"
         "<b>Sistema de Validación de Cobertura Costa Rica</b>\n\n"
-        "• <b>Rango máximo permitido:</b> hasta 400 metros del poste.\n\n"
-        "<b>¿Cómo consultar?</b>\n"
-        "1. Envía la <b>Ubicación GPS</b> tocando el clip 📎.\n"
-        "2. O envía coordenadas directas (ejemplo: <code>9.9355, -84.0782</code>).",
+        "• <b>≤ 150 m:</b> Factible directo (Aplica)\n"
+        "• <b>151 a 400 m:</b> Al borde (Requiere estudio)\n"
+        "• <b>> 400 m:</b> No aplica (Fuera de rango)\n\n"
+        "Envía una <b>ubicación GPS</b> o escribe las coordenadas (ej: <code>9.896244, -84.094007</code>).",
         parse_mode="HTML"
     )
 
 @bot.message_handler(content_types=['location'])
 def recibir_ubicacion(message):
-    responder_consulta(message.chat.id, message.location.latitude, message.location.longitude)
+    responder_consulta(message.chat.id, message.location.latitude, message.location.longitude, message.message_id)
 
 @bot.message_handler(func=lambda m: True)
 def recibir_texto(message):
     match = re.search(r'(-?\d{1,2}\.\d+)[,\s]+(-?\d{2,3}\.\d+)', message.text.strip())
     if match:
-        responder_consulta(message.chat.id, float(match.group(1)), float(match.group(2)))
+        lat = float(match.group(1))
+        lon = float(match.group(2))
+        responder_consulta(message.chat.id, lat, lon, message.message_id)
     else:
-        bot.reply_to(
-            message,
-            "⚠️ Formato no reconocido. Envía una ubicación GPS o coordenadas numéricas (ejemplo: <code>9.9355, -84.0782</code>).",
-            parse_mode="HTML"
-        )
+        # En grupos solo responder si parece un comando o solicitud explícita
+        if message.chat.type == "private":
+            bot.reply_to(
+                message,
+                "⚠️ Envía una ubicación GPS o coordenadas numéricas (ejemplo: <code>9.896244, -84.094007</code>).",
+                parse_mode="HTML"
+            )
 
 if __name__ == "__main__":
     inicializar_desde_zip()
-    print("🚀 Bot iniciado y listo con geocodificación territorial activa.")
+    print("🚀 Validador listo con reglas de negocio oficiales.")
     bot.infinity_polling(skip_pending=True)
