@@ -12,15 +12,22 @@ TOKEN = "8621312939:AAGurzTO0_zfKSXYoHNVFwQnSWDWQOjoKTc"
 DB_POSTES = "posteria_optimizada.db"
 
 # Calibración exacta según sistema corporativo
-UMBRAL_COBERTURA_DIRECTA = 70   # Metros para "Con cobertura" (Hay red en ese punto)
-UMBRAL_AL_BORDE = 500           # Metros para "Al borde" (Requiere estudio de campo)
+UMBRAL_COBERTURA_DIRECTA = 70   # Metros para "Con cobertura"
+UMBRAL_AL_BORDE = 500           # Metros para "Al borde" (Requiere estudio)
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=10)
 
+def dms_a_decimal(grados, minutos, segundos, direccion):
+    """Convierte Grados, Minutos y Segundos a formato Decimal."""
+    decimal = float(grados) + (float(minutos) / 60) + (float(segundos) / 3600)
+    if direccion.upper() in ['S', 'W', 'O']:  # Sur u Oeste/West son negativos
+        decimal *= -1
+    return decimal
+
 def obtener_geodireccion(lat, lon):
-    """Consulta OpenStreetMap para obtener división territorial y dirección de referencia."""
+    """Consulta OpenStreetMap para obtener división territorial y dirección."""
     url = f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat}&lon={lon}&addressdetails=1"
-    headers = {"User-Agent": "CoberturaCR_TelegramBot/2.0"}
+    headers = {"User-Agent": "CoberturaCR_TelegramBot/2.1"}
     try:
         r = requests.get(url, headers=headers, timeout=4)
         if r.status_code == 200:
@@ -145,13 +152,11 @@ def consultar_cobertura(lat_user, lon_user):
     conn = sqlite3.connect(DB_POSTES)
     c = conn.cursor()
     
-    # Rango inicial de búsqueda (~700 m a la redonda)
     delta = 0.0065
     c.execute("SELECT codigo, lat, lon FROM postes WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
               (lat_user - delta, lat_user + delta, lon_user - delta, lon_user + delta))
     candidatos = c.fetchall()
     
-    # Rango ampliado si no hay postes inmediatos (~2 km)
     if not candidatos:
         delta = 0.02
         c.execute("SELECT codigo, lat, lon FROM postes WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
@@ -199,7 +204,13 @@ def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
     geo = obtener_geodireccion(lat, lon)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat},{lon}&destination={res['lat']},{res['lon']}"
 
-    # Clasificación homologada con el sistema oficial
+    # Advertencia si cae fuera del GAM (San José, Heredia, Alajuela, Cartago)
+    gam_provincias = ["san josé", "heredia", "alajuela", "cartago"]
+    nota_gam = ""
+    if geo['provincia'].lower() not in gam_provincias and geo['provincia'] != "N/D":
+        nota_gam = "\n⚠️ <i>Atención: Zona fuera del GAM central.</i>\n"
+
+    # Clasificación homologada
     if dist <= UMBRAL_COBERTURA_DIRECTA:
         badge = "🟢 <b>CON COBERTURA</b>"
         obs = "Hay red en ese punto. Factible para instalación directa."
@@ -221,11 +232,11 @@ def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
         f"• <b>Barrio / Residencial:</b> {geo['barrio']}\n"
         f"• <b>Vía / Calle:</b> {geo['direccion']}\n"
         f"• <b>Punto consultado:</b> <code>{lat:.6f}, {lon:.6f}</code>\n\n"
-        f"ℹ️ <b>Diagnóstico:</b> {obs}"
+        f"ℹ️ <b>Diagnóstico:</b> {obs}{nota_gam}"
     )
 
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🗺 Ver ruta al poste en Google Maps", url=link_maps))
+    markup.add(types.InlineKeyboardButton("🗺 Ver ruta al poste", url=link_maps))
     bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup, reply_to_message_id=reply_to_message_id)
 
 @bot.message_handler(commands=['start', 'help'])
@@ -234,10 +245,12 @@ def cmd_start(message):
         message,
         f"👋 ¡Hola, {message.from_user.first_name}!\n\n"
         "<b>Sistema de Validación de Cobertura Costa Rica</b>\n\n"
-        "• <b>0 a 70 m:</b> 🟢 Con cobertura (Directa)\n"
-        "• <b>71 a 500 m:</b> 🟠 Al borde (Requiere estudio de campo)\n"
-        "• <b>> 500 m:</b> 🔴 No aplica (Sin factibilidad)\n\n"
-        "Envía una <b>ubicación GPS</b> o escribe las coordenadas numéricas (ejemplo: <code>10.068618, -84.193542</code>).",
+        "• <b>0 a 70 m:</b> 🟢 Con cobertura\n"
+        "• <b>71 a 500 m:</b> 🟠 Al borde (Requiere estudio)\n"
+        "• <b>> 500 m:</b> 🔴 No aplica\n\n"
+        "Puedes enviar tu <b>ubicación GPS</b>, o escribir coordenadas en Decimal o Grados:\n"
+        "📍 <code>9.953482, -84.150603</code>\n"
+        "📍 <code>9°50'11.5\"N 83°52'41.5\"W</code>",
         parse_mode="HTML"
     )
 
@@ -247,20 +260,35 @@ def recibir_ubicacion(message):
 
 @bot.message_handler(func=lambda m: True)
 def recibir_texto(message):
-    match = re.search(r'(-?\d{1,2}\.\d+)[,\s]+(-?\d{2,3}\.\d+)', message.text.strip())
-    if match:
-        lat = float(match.group(1))
-        lon = float(match.group(2))
+    texto = message.text.strip()
+    
+    # 1. Buscar formato GMS / DMS (ej: 9°50'11.5"N 83°52'41.5"W)
+    patron_dms = r'(\d+)[°\s]+(\d+)[\'\s]+([\d\.]+)"?\s*([NSns])[,;\s]*(\d+)[°\s]+(\d+)[\'\s]+([\d\.]+)"?\s*([WEweOo])'
+    match_dms = re.search(patron_dms, texto)
+    
+    # 2. Buscar formato Decimal normal (ej: 9.953482, -84.150603)
+    patron_decimal = r'(-?\d{1,2}\.\d+)[,\s]+(-?\d{2,3}\.\d+)'
+    match_decimal = re.search(patron_decimal, texto)
+
+    if match_dms:
+        lat = dms_a_decimal(match_dms.group(1), match_dms.group(2), match_dms.group(3), match_dms.group(4))
+        lon = dms_a_decimal(match_dms.group(5), match_dms.group(6), match_dms.group(7), match_dms.group(8))
         responder_consulta(message.chat.id, lat, lon, message.message_id)
+        
+    elif match_decimal:
+        lat = float(match_decimal.group(1))
+        lon = float(match_decimal.group(2))
+        responder_consulta(message.chat.id, lat, lon, message.message_id)
+        
     else:
         if message.chat.type == "private":
             bot.reply_to(
                 message,
-                "⚠️ Formato no reconocido. Envía una ubicación GPS o coordenadas en decimal (ejemplo: <code>10.068618, -84.193542</code>).",
+                "⚠️ Formato no reconocido. Envía una ubicación GPS, decimales o grados (ej: <code>9°50'11.5\"N 83°52'41.5\"W</code>).",
                 parse_mode="HTML"
             )
 
 if __name__ == "__main__":
     inicializar_desde_zip()
-    print("🚀 Validador oficial iniciado y escuchando consultas...")
+    print("🚀 Validador oficial iniciado (Soporte GMS y Decimal activado)...")
     bot.infinity_polling(skip_pending=True)
