@@ -25,7 +25,7 @@ def dms_a_decimal(grados, minutos, segundos, direccion):
 
 def obtener_geodireccion(lat, lon):
     url = f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat}&lon={lon}&addressdetails=1"
-    headers = {"User-Agent": "CoberturaCR_TelegramBot/3.1"}
+    headers = {"User-Agent": "CoberturaCR_TelegramBot/3.2"}
     try:
         r = requests.get(url, headers=headers, timeout=4)
         if r.status_code == 200:
@@ -35,17 +35,18 @@ def obtener_geodireccion(lat, lon):
                 addr.get("neighbourhood") or 
                 addr.get("residential") or 
                 addr.get("quarter") or 
+                addr.get("hamlet") or 
                 "No especificado en mapa"
             )
             
-            calle = addr.get("road") or addr.get("pedestrian") or ""
+            calle = addr.get("road") or addr.get("pedestrian") or addr.get("path") or ""
             numero = addr.get("house_number") or ""
             direccion = f"{calle} {numero}".strip() if calle else "Vía pública / Sin denominación"
             
             return {
                 "provincia": addr.get("state") or addr.get("region") or "N/D",
-                "canton": addr.get("county") or addr.get("municipality") or "N/D",
-                "distrito": addr.get("city_district") or addr.get("suburb") or "N/D",
+                "canton": addr.get("county") or addr.get("municipality") or addr.get("city") or "N/D",
+                "distrito": addr.get("city_district") or addr.get("suburb") or addr.get("town") or addr.get("village") or "N/D",
                 "barrio": barrio,
                 "direccion": direccion
             }
@@ -110,7 +111,7 @@ def haversine_metros(lat1, lon1, lat2, lon2):
 
 def obtener_distancia_calle(lat1, lon1, lat2, lon2):
     url = f"http://router.project-osrm.org/route/v1/foot/{lon1},{lat1};{lon2},{lat2}?overview=false"
-    headers = {"User-Agent": "CoberturaCR_TelegramBot/3.1"}
+    headers = {"User-Agent": "CoberturaCR_TelegramBot/3.2"}
     try:
         r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200:
@@ -173,7 +174,6 @@ def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
 
     geo = obtener_geodireccion(lat, lon)
     
-    # Aprendizaje del sistema corporativo: Alerta de Condominio basada en nomenclatura
     barrio_lower = geo['barrio'].lower()
     es_condominio = any(palabra in barrio_lower for palabra in ["condominio", "residencial", "urbanización", "condo"])
     alerta_condominio = f"\n🏢 <b>Condominio cercano:</b> {geo['barrio']} (Verificar acceso)" if es_condominio else ""
@@ -191,7 +191,6 @@ def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat},{lon}&destination={res['lat']},{res['lon']}"
     tipo_ruta = res.get("tipo_calculo", "Línea recta")
 
-    # Aprendizaje del sistema corporativo: Diagnósticos exactos
     if dist <= UMBRAL_COBERTURA_DIRECTA:
         badge = "🟢 <b>CON COBERTURA</b>"
         obs = "Hay red en ese punto. Factible para instalación directa."
@@ -212,7 +211,8 @@ def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
         f"• <b>Provincia:</b> {geo['provincia']}\n"
         f"• <b>Cantón:</b> {geo['canton']}\n"
         f"• <b>Distrito:</b> {geo['distrito']}\n"
-        f"• <b>Barrio:</b> {geo['barrio']}\n"
+        f"• <b>Barrio / Residencial:</b> {geo['barrio']}\n"
+        f"• <b>Vía / Calle:</b> {geo['direccion']}\n"
         f"• <b>Coordenadas:</b> <code>{lat:.6f}, {lon:.6f}</code>\n\n"
         f"ℹ️ <b>Diagnóstico:</b> {obs}"
     )
