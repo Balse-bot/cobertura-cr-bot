@@ -27,7 +27,7 @@ def dms_a_decimal(grados, minutos, segundos, direccion):
 def obtener_geodireccion(lat, lon):
     """Consulta OpenStreetMap para obtener división territorial y dirección."""
     url = f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat}&lon={lon}&addressdetails=1"
-    headers = {"User-Agent": "CoberturaCR_TelegramBot/2.1"}
+    headers = {"User-Agent": "CoberturaCR_TelegramBot/2.2"}
     try:
         r = requests.get(url, headers=headers, timeout=4)
         if r.status_code == 200:
@@ -137,6 +137,7 @@ def inicializar_desde_zip():
     print(f"✅ Proceso terminado: {total} elementos registrados.")
 
 def haversine_metros(lat1, lon1, lat2, lon2):
+    """Calcula la distancia en línea recta (vuelo de pájaro)."""
     R = 6371000
     phi1, phi2 = radians(lat1), radians(lat2)
     delta_phi = radians(lat2 - lat1)
@@ -145,6 +146,21 @@ def haversine_metros(lat1, lon1, lat2, lon2):
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
     return R * c
 
+def obtener_distancia_calle(lat1, lon1, lat2, lon2):
+    """Consulta OSRM para obtener la distancia real siguiendo las calles (en metros)."""
+    # OSRM usa el formato longitud,latitud
+    url = f"http://router.project-osrm.org/route/v1/foot/{lon1},{lat1};{lon2},{lat2}?overview=false"
+    headers = {"User-Agent": "CoberturaCR_TelegramBot/2.2"}
+    try:
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("code") == "Ok":
+                return data["routes"][0]["distance"]
+    except Exception:
+        pass
+    return None
+
 def consultar_cobertura(lat_user, lon_user):
     if not os.path.exists(DB_POSTES):
         return None
@@ -152,34 +168,45 @@ def consultar_cobertura(lat_user, lon_user):
     conn = sqlite3.connect(DB_POSTES)
     c = conn.cursor()
     
-    delta = 0.0065
+    # 1. Búsqueda por cuadrante amplio (~1.5 km a la redonda)
+    delta = 0.015
     c.execute("SELECT codigo, lat, lon FROM postes WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
               (lat_user - delta, lat_user + delta, lon_user - delta, lon_user + delta))
     candidatos = c.fetchall()
-    
-    if not candidatos:
-        delta = 0.02
-        c.execute("SELECT codigo, lat, lon FROM postes WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
-                  (lat_user - delta, lat_user + delta, lon_user - delta, lon_user + delta))
-        candidatos = c.fetchall()
-
     conn.close()
 
     if not candidatos:
         return {"encontrado": False}
 
+    # 2. Pre-filtrar los candidatos con Haversine (línea recta)
+    candidatos_con_distancia = []
+    for cod, lat, lon in candidatos:
+        d_lineal = haversine_metros(lat_user, lon_user, lat, lon)
+        candidatos_con_distancia.append((cod, lat, lon, d_lineal))
+    
+    # Ordenar por distancia lineal y tomar solo los 5 más cercanos
+    candidatos_con_distancia.sort(key=lambda x: x[3])
+    mejores_5 = candidatos_con_distancia[:5]
+
     mejor_poste = None
     dist_min = float('inf')
 
-    for cod, lat, lon in candidatos:
-        d = haversine_metros(lat_user, lon_user, lat, lon)
-        if d < dist_min:
-            dist_min = d
+    # 3. Calcular la distancia real por calles (Ruteo OSRM) para esos 5 candidatos
+    for cod, lat, lon, d_lineal in mejores_5:
+        d_calle = obtener_distancia_calle(lat_user, lon_user, lat, lon)
+        
+        # Si la API de calles responde, usar esa medida; si no, respaldo a línea recta
+        distancia_final = d_calle if d_calle is not None else d_lineal
+        tipo_calculo = "Ruta por calles (Vía Pública)" if d_calle is not None else "Línea recta (Referencia)"
+        
+        if distancia_final < dist_min:
+            dist_min = distancia_final
             mejor_poste = {
                 "codigo": cod,
                 "lat": lat,
                 "lon": lon,
-                "distancia": round(d, 1),
+                "distancia": round(dist_min, 1),
+                "tipo_calculo": tipo_calculo,
                 "encontrado": True
             }
 
@@ -203,12 +230,13 @@ def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
     dist = res["distancia"]
     geo = obtener_geodireccion(lat, lon)
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat},{lon}&destination={res['lat']},{res['lon']}"
+    tipo_ruta = res.get("tipo_calculo", "Línea recta")
 
     # Advertencia si cae fuera del GAM (San José, Heredia, Alajuela, Cartago)
     gam_provincias = ["san josé", "heredia", "alajuela", "cartago"]
     nota_gam = ""
     if geo['provincia'].lower() not in gam_provincias and geo['provincia'] != "N/D":
-        nota_gam = "\n⚠️ <i>Atención: Zona fuera del GAM central.</i>\n"
+        nota_gam = "\n\n⚠️ <i>Atención: Zona fuera del GAM central. Tiempos técnicos pueden variar.</i>"
 
     # Clasificación homologada
     if dist <= UMBRAL_COBERTURA_DIRECTA:
@@ -219,11 +247,12 @@ def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
         obs = f"Está a {int(dist)} metros de la red. Hace falta el estudio para confirmarlo."
     else:
         badge = "🔴 <b>NO APLICA</b>"
-        obs = f"Supera la distancia técnica permitida de {UMBRAL_AL_BORDE} metros."
+        obs = f"Supera la distancia técnica permitida de {UMBRAL_AL_BORDE} metros por recorrido."
 
     tarjeta = (
         f"{badge}\n\n"
         f"📏 <b>Distancia a la red:</b> <b>{dist} metros</b>\n"
+        f"🛣 <b>Tipo de medición:</b> {tipo_ruta}\n"
         f"🏷 <b>Poste / NAP más cercano:</b> <code>{res['codigo']}</code>\n\n"
         f"📍 <b>Ubicación Territorial:</b>\n"
         f"• <b>Provincia:</b> {geo['provincia']}\n"
@@ -231,12 +260,12 @@ def responder_consulta(chat_id, lat, lon, reply_to_message_id=None):
         f"• <b>Distrito:</b> {geo['distrito']}\n"
         f"• <b>Barrio / Residencial:</b> {geo['barrio']}\n"
         f"• <b>Vía / Calle:</b> {geo['direccion']}\n"
-        f"• <b>Punto consultado:</b> <code>{lat:.6f}, {lon:.6f}</code>\n\n"
+        f"• <b>Coordenadas:</b> <code>{lat:.6f}, {lon:.6f}</code>\n\n"
         f"ℹ️ <b>Diagnóstico:</b> {obs}{nota_gam}"
     )
 
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🗺 Ver ruta al poste", url=link_maps))
+    markup.add(types.InlineKeyboardButton("🗺 Ver ruta en Google Maps", url=link_maps))
     bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup, reply_to_message_id=reply_to_message_id)
 
 @bot.message_handler(commands=['start', 'help'])
@@ -244,7 +273,7 @@ def cmd_start(message):
     bot.reply_to(
         message,
         f"👋 ¡Hola, {message.from_user.first_name}!\n\n"
-        "<b>Sistema de Validación de Cobertura Costa Rica</b>\n\n"
+        "<b>Sistema de Validación de Cobertura (Modo Vial)</b>\n\n"
         "• <b>0 a 70 m:</b> 🟢 Con cobertura\n"
         "• <b>71 a 500 m:</b> 🟠 Al borde (Requiere estudio)\n"
         "• <b>> 500 m:</b> 🔴 No aplica\n\n"
@@ -262,11 +291,11 @@ def recibir_ubicacion(message):
 def recibir_texto(message):
     texto = message.text.strip()
     
-    # 1. Buscar formato GMS / DMS (ej: 9°50'11.5"N 83°52'41.5"W)
+    # 1. Buscar formato GMS / DMS
     patron_dms = r'(\d+)[°\s]+(\d+)[\'\s]+([\d\.]+)"?\s*([NSns])[,;\s]*(\d+)[°\s]+(\d+)[\'\s]+([\d\.]+)"?\s*([WEweOo])'
     match_dms = re.search(patron_dms, texto)
     
-    # 2. Buscar formato Decimal normal (ej: 9.953482, -84.150603)
+    # 2. Buscar formato Decimal
     patron_decimal = r'(-?\d{1,2}\.\d+)[,\s]+(-?\d{2,3}\.\d+)'
     match_decimal = re.search(patron_decimal, texto)
 
@@ -284,11 +313,11 @@ def recibir_texto(message):
         if message.chat.type == "private":
             bot.reply_to(
                 message,
-                "⚠️ Formato no reconocido. Envía una ubicación GPS, decimales o grados (ej: <code>9°50'11.5\"N 83°52'41.5\"W</code>).",
+                "⚠️ Formato no reconocido. Envía una ubicación GPS o coordenadas válidas.",
                 parse_mode="HTML"
             )
 
 if __name__ == "__main__":
     inicializar_desde_zip()
-    print("🚀 Validador oficial iniciado (Soporte GMS y Decimal activado)...")
+    print("🚀 Validador oficial iniciado (Modo de medición por vía pública)...")
     bot.infinity_polling(skip_pending=True)
