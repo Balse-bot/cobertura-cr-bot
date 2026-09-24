@@ -9,24 +9,33 @@ from telebot import types
 
 TOKEN = "8621312939:AAGurzTO0_zfKSXYoHNVFwQnSWDWQOjoKTc"
 DB_POSTES = "posteria_optimizada.db"
-RADIO_MAXIMO_METROS = 100  # Límite técnico comercial para cable drop
+RADIO_MAXIMO_METROS = 400  # Límite comercial de factibilidad
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=10)
 
 def inicializar_desde_zip():
-    """Detecta el archivo .zip o .kmz, extrae el KML y crea la base de datos SQLite."""
+    """Extrae el KML desde el ZIP e indexa la red con campos territoriales ampliados."""
     if os.path.exists(DB_POSTES):
-        print("✅ Base de datos SQLite detectada y lista.")
-        return
+        # Si la base de datos ya existía con el esquema anterior, verificar si tiene la columna barrio
+        conn = sqlite3.connect(DB_POSTES)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(postes)")
+        cols = [col[1] for col in c.fetchall()]
+        conn.close()
+        if "barrio" in cols:
+            print("✅ Base de datos SQLite actualizada y lista.")
+            return
+        else:
+            print("🔄 Actualizando estructura de base de datos a nuevo esquema...")
+            os.remove(DB_POSTES)
 
-    # Buscar cualquier archivo .zip o .kmz subido al repositorio
     archivos = [f for f in os.listdir('.') if f.endswith('.zip') or f.endswith('.kmz')]
     if not archivos:
-        print("⚠️ No se encontró ningún archivo .zip o .kmz en el directorio.")
+        print("⚠️ No se encontró ningún archivo .zip o .kmz.")
         return
 
     zip_path = archivos[0]
-    print(f"📦 Procesando {zip_path} y generando índice espacial...")
+    print(f"📦 Procesando {zip_path}...")
 
     conn = sqlite3.connect(DB_POSTES)
     c = conn.cursor()
@@ -38,7 +47,8 @@ def inicializar_desde_zip():
             lon REAL,
             provincia TEXT,
             canton TEXT,
-            distrito TEXT
+            distrito TEXT,
+            barrio TEXT
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_coords ON postes(lat, lon)")
@@ -46,7 +56,7 @@ def inicializar_desde_zip():
     with zipfile.ZipFile(zip_path, 'r') as z:
         kml_candidatos = [n for n in z.namelist() if n.lower().endswith('.kml')]
         if not kml_candidatos:
-            print("⚠️ No se encontró ningún archivo .kml dentro del ZIP.")
+            print("⚠️ No se encontró ningún KML en el ZIP.")
             conn.close()
             return
         
@@ -69,30 +79,32 @@ def inicializar_desde_zip():
                             name_tag = elem.find('{*}name')
                             codigo = name_tag.text.strip() if (name_tag is not None and name_tag.text) else "S/C"
                             
-                            prov, cant, dist = "N/D", "N/D", "N/D"
+                            prov, cant, dist, barrio = "N/D", "N/D", "N/D", "N/D"
                             for sd in elem.findall('.//{*}SimpleData'):
                                 c_nom = sd.attrib.get('name', '').lower()
-                                val = sd.text or ""
+                                val = (sd.text or "").strip()
                                 if 'prov' in c_nom: prov = val
                                 elif 'cant' in c_nom: cant = val
                                 elif 'dist' in c_nom: dist = val
+                                elif any(k in c_nom for k in ['barrio', 'condominio', 'urbanizac', 'residenc', 'sector', 'localidad']):
+                                    barrio = val
 
-                            batch.append((codigo, lat, lon, prov, cant, dist))
+                            batch.append((codigo, lat, lon, prov, cant, dist, barrio))
                             total += 1
 
                             if len(batch) >= 5000:
-                                c.executemany("INSERT INTO postes (codigo, lat, lon, provincia, canton, distrito) VALUES (?, ?, ?, ?, ?, ?)", batch)
+                                c.executemany("INSERT INTO postes (codigo, lat, lon, provincia, canton, distrito, barrio) VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
                                 conn.commit()
                                 batch = []
                                 print(f"📍 {total} postes indexados...")
                     elem.clear()
 
             if batch:
-                c.executemany("INSERT INTO postes (codigo, lat, lon, provincia, canton, distrito) VALUES (?, ?, ?, ?, ?, ?)", batch)
+                c.executemany("INSERT INTO postes (codigo, lat, lon, provincia, canton, distrito, barrio) VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
                 conn.commit()
 
     conn.close()
-    print(f"✅ Inicialización completa: {total} postes guardados en SQLite.")
+    print(f"✅ Proceso terminado: {total} elementos registrados.")
 
 def haversine_metros(lat1, lon1, lat2, lon2):
     R = 6371000
@@ -110,21 +122,21 @@ def consultar_cobertura(lat_user, lon_user):
     conn = sqlite3.connect(DB_POSTES)
     c = conn.cursor()
     
-    # Rango inicial de búsqueda (~250m)
-    delta = 0.0025
+    # Búsqueda inicial ~600 metros alrededor
+    delta = 0.0055
     c.execute("""
-        SELECT codigo, lat, lon, provincia, canton, distrito
+        SELECT codigo, lat, lon, provincia, canton, distrito, barrio
         FROM postes
         WHERE lat BETWEEN ? AND ?
           AND lon BETWEEN ? AND ?
     """, (lat_user - delta, lat_user + delta, lon_user - delta, lon_user + delta))
     candidatos = c.fetchall()
     
-    # Si no hay postes cercanos, ampliar radio (~1.5 km)
+    # Si no hay candidatos, ampliar a radio extendido (~2 km)
     if not candidatos:
-        delta = 0.015
+        delta = 0.02
         c.execute("""
-            SELECT codigo, lat, lon, provincia, canton, distrito
+            SELECT codigo, lat, lon, provincia, canton, distrito, barrio
             FROM postes
             WHERE lat BETWEEN ? AND ?
               AND lon BETWEEN ? AND ?
@@ -139,7 +151,7 @@ def consultar_cobertura(lat_user, lon_user):
     mejor_poste = None
     dist_min = float('inf')
 
-    for cod, lat, lon, prov, cant, dist in candidatos:
+    for cod, lat, lon, prov, cant, dist, barrio in candidatos:
         d = haversine_metros(lat_user, lon_user, lat, lon)
         if d < dist_min:
             dist_min = d
@@ -150,6 +162,7 @@ def consultar_cobertura(lat_user, lon_user):
                 "provincia": prov,
                 "canton": cant,
                 "distrito": dist,
+                "barrio": barrio,
                 "distancia": round(d, 1),
                 "cobertura": d <= RADIO_MAXIMO_METROS,
                 "encontrado": True
@@ -160,13 +173,13 @@ def consultar_cobertura(lat_user, lon_user):
 def responder_consulta(chat_id, lat, lon):
     res = consultar_cobertura(lat, lon)
     if not res:
-        bot.send_message(chat_id, "⚠️ El sistema está indexando la red por primera vez. Intenta en 15 segundos.")
+        bot.send_message(chat_id, "⚠️ El sistema está indexando la base de datos. Por favor reintenta en unos segundos.")
         return
 
     if not res["encontrado"]:
         bot.send_message(
             chat_id,
-            f"🔴 <b>FUERA DE COBERTURA TOTAL</b>\n\nNo se detectaron postes en un radio de 1.5 km de (<code>{lat:.5f}, {lon:.5f}</code>).",
+            f"❌ <b>NO APLICA - SIN COBERTURA</b>\n\nNo se localizó infraestructura de red cercana a las coordenadas (<code>{lat:.5f}, {lon:.5f}</code>).",
             parse_mode="HTML"
         )
         return
@@ -175,26 +188,32 @@ def responder_consulta(chat_id, lat, lon):
     link_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat},{lon}&destination={res['lat']},{res['lon']}"
 
     if res["cobertura"]:
-        titulo = "🟢 <b>FACTIBLE - CON COBERTURA</b>"
-        obs = f"Acometida drop dentro de norma (≤ {RADIO_MAXIMO_METROS}m)."
+        estado_header = "✅ <b>FACTIBILIDAD: APLICA</b>"
+        estado_badge = "🟢 <b>CON COBERTURA COMERCIAL</b>"
+        obs = f"El punto consultado está dentro del rango permitido (≤ {RADIO_MAXIMO_METROS} m)."
     else:
-        titulo = "🔴 <b>NO FACTIBLE - FUERA DE RANGO</b>"
-        obs = f"Supera el límite permitido de {RADIO_MAXIMO_METROS}m."
+        estado_header = "❌ <b>FACTIBILIDAD: NO APLICA</b>"
+        estado_badge = "🔴 <b>FUERA DE RANGO MÁXIMO</b>"
+        obs = f"Supera la distancia máxima autorizada de {RADIO_MAXIMO_METROS} metros."
+
+    barrio_txt = res['barrio'] if res['barrio'] != "N/D" else "No especificado en capa"
 
     tarjeta = (
-        f"{titulo}\n\n"
-        f"📍 <b>División Territorial:</b>\n"
+        f"{estado_header}\n"
+        f"{estado_badge}\n\n"
+        f"📏 <b>Distancia al poste:</b> <b>{dist} metros</b> (Máx: {RADIO_MAXIMO_METROS}m)\n"
+        f"🏷 <b>Poste / NAP:</b> <code>{res['codigo']}</code>\n\n"
+        f"📍 <b>Ubicación y Dirección Territorial:</b>\n"
         f"• <b>Provincia:</b> {res['provincia']}\n"
         f"• <b>Cantón:</b> {res['canton']}\n"
-        f"• <b>Distrito:</b> {res['distrito']}\n\n"
-        f"⚡ <b>Datos de Red:</b>\n"
-        f"• <b>Poste / NAP:</b> <code>{res['codigo']}</code>\n"
-        f"• <b>Distancia al cliente:</b> <b>{dist} metros</b>\n\n"
-        f"📝 <b>Observación:</b> {obs}"
+        f"• <b>Distrito:</b> {res['distrito']}\n"
+        f"• <b>Barrio / Condominio:</b> {barrio_txt}\n"
+        f"• <b>Coordenadas cliente:</b> <code>{lat:.5f}, {lon:.5f}</code>\n\n"
+        f"ℹ️ <b>Diagnóstico:</b> {obs}"
     )
 
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🗺 Ver ruta en Google Maps", url=link_maps))
+    markup.add(types.InlineKeyboardButton("🗺 Ver ruta al poste en Google Maps", url=link_maps))
     bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup)
 
 @bot.message_handler(commands=['start', 'help'])
@@ -202,10 +221,11 @@ def cmd_start(message):
     bot.reply_to(
         message,
         f"👋 ¡Hola, {message.from_user.first_name}!\n\n"
-        "<b>Validador de Cobertura Costa Rica</b>\n\n"
-        "Para consultar factibilidad:\n"
-        "1. Toca el clip 📎 y envía tu <b>Ubicación GPS</b>.\n"
-        "2. O envía coordenadas directas (ejemplo: <code>9.9355, -84.0782</code>).",
+        "<b>Sistema de Validación de Cobertura Costa Rica</b>\n\n"
+        "• <b>Radio permitido:</b> hasta 400 metros del poste.\n\n"
+        "<b>¿Cómo consultar?</b>\n"
+        "1. Envía tu <b>Ubicación en tiempo real / GPS</b> tocando el clip 📎.\n"
+        "2. O escribe coordenadas numéricas (ejemplo: <code>9.9355, -84.0782</code>).",
         parse_mode="HTML"
     )
 
@@ -219,9 +239,13 @@ def recibir_texto(message):
     if match:
         responder_consulta(message.chat.id, float(match.group(1)), float(match.group(2)))
     else:
-        bot.reply_to(message, "⚠️ Envía una ubicación GPS o coordenadas numéricas (ejemplo: <code>9.9355, -84.0782</code>).", parse_mode="HTML")
+        bot.reply_to(
+            message,
+            "⚠️ Formato no reconocido. Envía una ubicación GPS directa o coordenadas en formato decimal (ejemplo: <code>9.9355, -84.0782</code>).",
+            parse_mode="HTML"
+        )
 
 if __name__ == "__main__":
     inicializar_desde_zip()
-    print("🚀 Validador listo y escuchando en Koyeb...")
+    print("🚀 Bot iniciado y listo para recibir consultas.")
     bot.infinity_polling(skip_pending=True)
