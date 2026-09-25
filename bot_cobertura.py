@@ -14,8 +14,8 @@ from telebot import types
 TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
 DB_POSTES = "posteria_optimizada.db"
 
-# 🔒 SEGURIDAD: Coloca aquí tu ID numérico de Telegram para poder subir archivos.
-# Si no lo sabes, mándale /id al bot y te lo dirá.
+# 🔒 SEGURIDAD: Reemplaza este número por tu ID de Telegram.
+# Escríbele /id al bot para saber cuál es el tuyo.
 ADMINS = [123456789]  
 
 # Calibración exacta
@@ -328,7 +328,7 @@ def responder_multiconsulta(chat_id, lista_coords, reply_to_message_id):
         else:
             p = res["principal"]
             d = p["distancia"]
-            if d <= UMBRAL_COBERTURA_DIRECTA: estado = f"🟢 CON COBERTURA ({int(d)}m)"
+            if d <= UMBRAL_COBERTURA_DIRECTA: estado = f"🟢 CON COBERT ({int(d)}m)"
             elif d <= UMBRAL_AL_BORDE: estado = f"🟠 AL BORDE ({int(d)}m)"
             else: estado = f"🔴 FUERA DE RED ({int(d)}m)"
             
