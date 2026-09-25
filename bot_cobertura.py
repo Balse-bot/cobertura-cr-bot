@@ -16,7 +16,7 @@ DB_POSTES = "posteria_optimizada.db"
 
 # 🔒 SEGURIDAD: Reemplaza este número por tu ID de Telegram.
 # Escríbele /id al bot para saber cuál es el tuyo.
-ADMINS = [123456789]  
+ADMINS = [1402264487]  
 
 # Calibración exacta
 UMBRAL_COBERTURA_DIRECTA = 70
