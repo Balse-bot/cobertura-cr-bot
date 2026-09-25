@@ -14,8 +14,7 @@ from telebot import types
 TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
 DB_POSTES = "posteria_optimizada.db"
 
-# 🔒 SEGURIDAD: Reemplaza este número por tu ID de Telegram.
-# Escríbele /id al bot para saber cuál es el tuyo.
+# 🔒 SEGURIDAD: Tu ID personal ya está configurado.
 ADMINS = [1402264487]  
 
 # Calibración exacta
@@ -38,23 +37,20 @@ bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=10)
 # ==========================================
 
 def inicializar_bd():
-    """Crea las tablas de postes y de caché si no existen."""
     conn = sqlite3.connect(DB_POSTES)
     c = conn.cursor()
     c.execute("CREATE TABLE IF NOT EXISTS postes (id INTEGER PRIMARY KEY AUTOINCREMENT, codigo TEXT, lat REAL, lon REAL)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_coords ON postes(lat, lon)")
     
-    # Tablas de caché para prevenir bloqueos de IP
     c.execute("CREATE TABLE IF NOT EXISTS cache_nominatim (coords_key TEXT PRIMARY KEY, json_data TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS cache_osrm (ruta_key TEXT PRIMARY KEY, distancia REAL)")
     conn.commit()
     conn.close()
 
 def forzar_reconstruccion_bd(zip_path):
-    """Borra la red vieja y carga el nuevo ZIP/KMZ directamente."""
     conn = sqlite3.connect(DB_POSTES)
     c = conn.cursor()
-    c.execute("DELETE FROM postes") # Borrar red anterior
+    c.execute("DELETE FROM postes") 
     
     total_insertados = 0
     try:
@@ -140,7 +136,7 @@ def obtener_geodireccion(lat, lon):
         return json.loads(row[0])
 
     url = f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
-    headers = {"User-Agent": "CoberturaCR_TelegramBot/4.0"}
+    headers = {"User-Agent": "CoberturaCR_TelegramBot/4.1"}
     
     res_data = {"provincia": "N/D", "canton": "N/D", "distrito": "N/D", "barrio": "N/D", "direccion": "N/D"}
     try:
@@ -184,7 +180,7 @@ def obtener_distancia_calle(lat1, lon1, lat2, lon2):
         return row[0]
 
     url = f"http://router.project-osrm.org/route/v1/foot/{lon1},{lat1};{lon2},{lat2}?overview=false"
-    headers = {"User-Agent": "CoberturaCR_TelegramBot/4.0"}
+    headers = {"User-Agent": "CoberturaCR_TelegramBot/4.1"}
     dist_final = None
     try:
         r = requests.get(url, headers=headers, timeout=3)
@@ -203,7 +199,7 @@ def obtener_distancia_calle(lat1, lon1, lat2, lon2):
 
 
 # ==========================================
-# 3. LÓGICA DE COBERTURA
+# 3. LÓGICA DE COBERTURA (MODO HÍBRIDO)
 # ==========================================
 
 def consultar_cobertura_detallada(lat_user, lon_user):
@@ -227,6 +223,7 @@ def consultar_cobertura_detallada(lat_user, lon_user):
         d_lineal = haversine_metros(lat_user, lon_user, lat, lon)
         candidatos_dist.append((cod, lat, lon, d_lineal))
 
+    # Ordenar por línea recta para emular la lógica oficial
     candidatos_dist.sort(key=lambda x: x[3])
     mejores_n = candidatos_dist[:CANDIDATOS_A_EVALUAR]
 
@@ -235,18 +232,26 @@ def consultar_cobertura_detallada(lat_user, lon_user):
         d_calle = obtener_distancia_calle(lat_user, lon_user, lat, lon)
         if d_calle is not None:
             if d_lineal > 0 and d_calle > d_lineal * FACTOR_MAX_RUTA_VS_LINEAL:
-                distancia_final = d_lineal
+                d_calle_final = d_lineal
                 tipo = "Línea recta"
             else:
-                distancia_final = d_calle
+                d_calle_final = d_calle
                 tipo = "Ruta por calles"
         else:
-            distancia_final = d_lineal
+            d_calle_final = d_lineal
             tipo = "Línea recta"
 
-        lista_evaluada.append({"codigo": cod, "lat": lat, "lon": lon, "distancia": round(distancia_final, 1), "tipo": tipo})
+        lista_evaluada.append({
+            "codigo": cod, 
+            "lat": lat, 
+            "lon": lon, 
+            "distancia_lineal": round(d_lineal, 1), 
+            "distancia_calle": round(d_calle_final, 1), 
+            "tipo": tipo
+        })
 
-    lista_evaluada.sort(key=lambda x: x["distancia"])
+    # Orden final basado en la distancia lineal (oficial)
+    lista_evaluada.sort(key=lambda x: x["distancia_lineal"])
     return {"encontrado": True, "principal": lista_evaluada[0], "siguientes": lista_evaluada[1:4]}
 
 # ==========================================
@@ -270,34 +275,39 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
             f"──────────────────────\n"
             f"(límite: {LIMITE_COBERTURA} m)\n\n"
             f"📍 <b>Punto:</b> <code>{lat:.6f}, {lon:.6f}</code>\n\n"
-            f"🗺️ <b>Ubicación:</b> {geo['provincia']}, {geo['canton']}, {geo['barrio']}\n"
+            f"🗺️ <b>Ubicación territorial:</b>\n"
+            f"• Provincia: {geo['provincia']}\n"
+            f"• Cantón: {geo['canton']}\n"
+            f"• Barrio: {geo['barrio']}\n"
             f"• Vía: {geo['direccion']}"
         )
         bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_to_message_id=reply_to_message_id)
         return
 
     p = res["principal"]
-    d = p["distancia"]
+    d_lineal = p["distancia_lineal"]
+    d_calle = p["distancia_calle"]
 
-    if d <= UMBRAL_COBERTURA_DIRECTA:
+    if d_lineal <= UMBRAL_COBERTURA_DIRECTA:
         header, icon = "🟢 <b>CON COBERTURA — Instalación Directa</b>", "🟢"
-    elif d <= UMBRAL_AL_BORDE:
+    elif d_lineal <= UMBRAL_AL_BORDE:
         header, icon = "🟠 <b>AL BORDE — Requiere Estudio</b>", "🟠"
     else:
         header, icon = "🔴 <b>FUERA DE RED — Registrar para expansión</b>", "🔴"
 
-    s_txt = f"🔌 <b>Nodo más cercano:</b>\n• <code>{p['codigo']}</code>  →  <b>{int(d)} m</b> {icon}\n"
+    s_txt = f"🔌 <b>Al nodo más cercano:</b>\n• <code>{p['codigo']}</code>\n"
     if res["siguientes"]:
-        s_txt = f"🔌 <b>Al nodo más cercano:</b>\n• <code>{p['codigo']}</code>  →  <b>{int(d)} m</b> {icon}\n\n<b>Siguientes:</b>\n"
+        s_txt += "\n<b>Siguientes Nodos:</b>\n"
         for s in res["siguientes"]:
-            s_txt += f"• <code>{s['codigo']}</code>  →  {int(s['distancia'])} m\n"
+            s_txt += f"• <code>{s['codigo']}</code>  →  {int(s['distancia_lineal'])} m (Radial)\n"
 
     link = f"https://www.google.com/maps/dir/?api=1&origin={lat},{lon}&destination={p['lat']},{p['lon']}"
     tarjeta = (
         f"{header}\n\n"
         f"📊 <b>Medición</b>  |  <b>Distancia</b>\n"
         f"──────────────────────\n"
-        f"📏 Al tendido de fibra  →  <b>{int(d)} m</b> {icon}\n\n"
+        f"📏 <b>Línea Recta (Oficial):</b>  →  <b>{int(d_lineal)} m</b> {icon}\n"
+        f"🚶‍♂️ <b>Ruta por Calle (Real):</b>  →  <b>{int(d_calle)} m</b>\n\n"
         f"{s_txt}"
         f"──────────────────────\n"
         f"(límite: {LIMITE_COBERTURA} m)\n\n"
@@ -324,10 +334,10 @@ def responder_multiconsulta(chat_id, lista_coords, reply_to_message_id):
             continue
             
         if not res["encontrado"]:
-            mensaje += f"{i}️⃣ <code>{lat:.5f}, {lon:.5f}</code>\n├ Estado: 🔴 FUERA DE RED (Sin datos cercanos)\n└ NAP: N/A\n\n"
+            mensaje += f"{i}️⃣ <code>{lat:.5f}, {lon:.5f}</code>\n├ Estado: 🔴 FUERA DE RED (Sin datos)\n└ NAP: N/A\n\n"
         else:
             p = res["principal"]
-            d = p["distancia"]
+            d = p["distancia_lineal"]
             if d <= UMBRAL_COBERTURA_DIRECTA: estado = f"🟢 CON COBERT ({int(d)}m)"
             elif d <= UMBRAL_AL_BORDE: estado = f"🟠 AL BORDE ({int(d)}m)"
             else: estado = f"🔴 FUERA DE RED ({int(d)}m)"
@@ -344,7 +354,7 @@ def responder_multiconsulta(chat_id, lista_coords, reply_to_message_id):
 
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(message):
-    bot.reply_to(message, "📡 <b>Sistema de Validación (Oficina 4.0)</b>\nEnvía coordenadas individuales o múltiples a la vez.", parse_mode="HTML")
+    bot.reply_to(message, "📡 <b>Sistema de Validación (Oficina 4.1 Híbrido)</b>\nEnvía coordenadas individuales o múltiples a la vez.", parse_mode="HTML")
 
 @bot.message_handler(commands=['id'])
 def cmd_id(message):
@@ -352,7 +362,6 @@ def cmd_id(message):
 
 @bot.message_handler(content_types=['document'])
 def recibir_archivo_red(message):
-    """Permite al administrador subir un nuevo KMZ o ZIP directamente por el chat."""
     if message.chat.id not in ADMINS:
         bot.reply_to(message, "⛔ No tienes permisos administrativos para modificar la red.")
         return
@@ -382,7 +391,6 @@ def recibir_ubicacion(message):
 def recibir_texto(message):
     texto = message.text.strip()
     
-    # Extraer formato decimal
     patron_decimal = r'(-?\d{1,2}\.\d+)[,\s]+(-?\d{2,3}\.\d+)'
     matches_decimal = re.findall(patron_decimal, texto)
     
@@ -399,7 +407,6 @@ def recibir_texto(message):
         else:
             responder_multiconsulta(message.chat.id, coords, message.message_id)
     else:
-        # Fallback para DMS (Un solo punto)
         patron_dms = r'(\d+)[°\s]+(\d+)[\'\s]+([\d\.]+)"?\s*([NSns])[,;\s]*(\d+)[°\s]+(\d+)[\'\s]+([\d\.]+)"?\s*([WEweOo])'
         match_dms = re.search(patron_dms, texto)
         if match_dms:
@@ -411,5 +418,5 @@ def recibir_texto(message):
 
 if __name__ == "__main__":
     inicializar_bd()
-    logger.info("🚀 Validador 4.0 iniciado (Caché + Lotes + Upload)")
+    logger.info("🚀 Validador 4.1 (Híbrido) iniciado")
     bot.infinity_polling(skip_pending=True)
