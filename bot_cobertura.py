@@ -10,7 +10,7 @@ import requests
 import telebot
 from telebot import types
 
-TOKEN = "8621312939:AAGurzTO0_zfKSXYoHNVFwQnSWDWQOjoKTc"
+TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
 DB_POSTES = "posteria_optimizada.db"
 
 # Calibración exacta
