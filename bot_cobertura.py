@@ -15,9 +15,6 @@ from fastapi import FastAPI, Request, Response
 TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
 DB_POSTES = "posteria_optimizada.db"
 
-# API Key para Mapbox Static Images API (Dejar vacío o "TU_API_KEY_AQUI" hasta configurar en Render)
-MAPBOX_API_KEY = os.getenv("MAPBOX_API_KEY", "")
-
 # 🔒 SEGURIDAD: Tu ID personal ya está configurado.
 ADMINS = [1402264487]  
 
@@ -35,7 +32,15 @@ logger = logging.getLogger("cobertura_bot")
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=10)
 
-app = FastAPI()
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    inicializar_bd()
+    logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Webhook")
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def read_root():
@@ -279,13 +284,14 @@ def consultar_cobertura_detallada(lat_user, lon_user):
 # ==========================================
 
 def obtener_imagen_mapa(lat, lon):
-    if not MAPBOX_API_KEY:
+    mapbox_token = os.environ.get("MAPBOX_API_KEY")
+    if not mapbox_token:
         return None
 
     # Mapbox usa lon,lat (en ese orden)
     url = (f"https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/"
-           f"pin-l+ff0000({lon},{lat})/{lon},{lat},16,0,0/600x400"
-           f"?access_token={MAPBOX_API_KEY}")
+           f"pin-s-l+ff0000({lon},{lat})/{lon},{lat},15,0/400x300"
+           f"?access_token={mapbox_token}")
 
     try:
         r = requests.get(url, timeout=5)
@@ -307,9 +313,11 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
 
     # Intentar enviar la foto del mapa
     mapa_bytes = obtener_imagen_mapa(lat, lon)
+    foto_enviada_exito = False
     if mapa_bytes:
         try:
             bot.send_photo(chat_id, mapa_bytes, reply_to_message_id=reply_to_message_id)
+            foto_enviada_exito = True
         except Exception as e:
             logger.error(f"No se pudo enviar la foto del mapa: {e}")
 
@@ -329,7 +337,7 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
             f"• Vía: {geo['direccion']}"
         )
         # Si ya enviamos foto, no hace falta usar reply_to en el texto para no saturar
-        reply_to = None if mapa_bytes else reply_to_message_id
+        reply_to = None if foto_enviada_exito else reply_to_message_id
         bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_to_message_id=reply_to)
         return
 
@@ -369,7 +377,7 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     )
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🗺 Ver ruta al NAP en Google Maps", url=link))
-    reply_to = None if mapa_bytes else reply_to_message_id
+    reply_to = None if foto_enviada_exito else reply_to_message_id
     bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup, reply_to_message_id=reply_to)
 
 def responder_multiconsulta(chat_id, lista_coords, reply_to_message_id):
@@ -465,19 +473,6 @@ def recibir_texto(message):
             responder_consulta_individual(message.chat.id, lat, lon, message.message_id)
         else:
             bot.reply_to(message, "🤔 No pude reconocer coordenadas en ese mensaje.", parse_mode="HTML")
-
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    inicializar_bd()
-    logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Webhook")
-    # Configurar webhook (opcional, si se quiere automatizar)
-    # bot.remove_webhook()
-    # bot.set_webhook(url="https://your_domain_here/webhook")
-    yield
-
-app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
     import uvicorn
