@@ -15,6 +15,9 @@ from fastapi import FastAPI, Request, Response
 TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
 DB_POSTES = "posteria_optimizada.db"
 
+# API Key para Google Maps Static API (Dejar vacío o "TU_API_KEY_AQUI" hasta configurar en Render)
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
 # 🔒 SEGURIDAD: Tu ID personal ya está configurado.
 ADMINS = [1402264487]  
 
@@ -275,6 +278,25 @@ def consultar_cobertura_detallada(lat_user, lon_user):
 # 4. RESPUESTAS E INTERFAZ TELEGRAM
 # ==========================================
 
+def obtener_imagen_mapa(lat, lon):
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+
+    url = (f"https://maps.googleapis.com/maps/api/staticmap?"
+           f"center={lat},{lon}&zoom=16&size=600x400&maptype=roadmap"
+           f"&markers=color:red%7C{lat},{lon}"
+           f"&key={GOOGLE_MAPS_API_KEY}")
+
+    try:
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            return io.BytesIO(r.content)
+        else:
+            logger.error(f"Error obteniendo Static Map: HTTP {r.status_code}")
+    except Exception as e:
+        logger.error(f"Excepción obteniendo Static Map: {e}")
+    return None
+
 def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     res = consultar_cobertura_detallada(lat, lon)
     if res and res.get("error"):
@@ -282,6 +304,14 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
         return
 
     geo = obtener_geodireccion(lat, lon)
+
+    # Intentar enviar la foto del mapa
+    mapa_bytes = obtener_imagen_mapa(lat, lon)
+    if mapa_bytes:
+        try:
+            bot.send_photo(chat_id, mapa_bytes, reply_to_message_id=reply_to_message_id)
+        except Exception as e:
+            logger.error(f"No se pudo enviar la foto del mapa: {e}")
 
     if not res["encontrado"]:
         tarjeta = (
@@ -298,7 +328,9 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
             f"• Barrio: {geo['barrio']}\n"
             f"• Vía: {geo['direccion']}"
         )
-        bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_to_message_id=reply_to_message_id)
+        # Si ya enviamos foto, no hace falta usar reply_to en el texto para no saturar
+        reply_to = None if mapa_bytes else reply_to_message_id
+        bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_to_message_id=reply_to)
         return
 
     p = res["principal"]
@@ -337,7 +369,8 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     )
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🗺 Ver ruta al NAP en Google Maps", url=link))
-    bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup, reply_to_message_id=reply_to_message_id)
+    reply_to = None if mapa_bytes else reply_to_message_id
+    bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup, reply_to_message_id=reply_to)
 
 def responder_multiconsulta(chat_id, lista_coords, reply_to_message_id):
     bot.send_message(chat_id, f"⏳ Evaluando lote de {len(lista_coords)} ubicaciones. Calculando rutas...", reply_to_message_id=reply_to_message_id)
