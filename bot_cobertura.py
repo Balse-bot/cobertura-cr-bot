@@ -15,8 +15,8 @@ from fastapi import FastAPI, Request, Response
 TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
 DB_POSTES = "posteria_optimizada.db"
 
-# API Key para Google Maps Static API (Dejar vacío o "TU_API_KEY_AQUI" hasta configurar en Render)
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+# API Key para Mapbox Static Images API (Dejar vacío o "TU_API_KEY_AQUI" hasta configurar en Render)
+MAPBOX_API_KEY = os.getenv("MAPBOX_API_KEY", "")
 
 # 🔒 SEGURIDAD: Tu ID personal ya está configurado.
 ADMINS = [1402264487]  
@@ -279,13 +279,13 @@ def consultar_cobertura_detallada(lat_user, lon_user):
 # ==========================================
 
 def obtener_imagen_mapa(lat, lon):
-    if not GOOGLE_MAPS_API_KEY:
+    if not MAPBOX_API_KEY:
         return None
 
-    url = (f"https://maps.googleapis.com/maps/api/staticmap?"
-           f"center={lat},{lon}&zoom=16&size=600x400&maptype=roadmap"
-           f"&markers=color:red%7C{lat},{lon}"
-           f"&key={GOOGLE_MAPS_API_KEY}")
+    # Mapbox usa lon,lat (en ese orden)
+    url = (f"https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/"
+           f"pin-l+ff0000({lon},{lat})/{lon},{lat},16,0,0/600x400"
+           f"?access_token={MAPBOX_API_KEY}")
 
     try:
         r = requests.get(url, timeout=5)
