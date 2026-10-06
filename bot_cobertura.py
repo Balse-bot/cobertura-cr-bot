@@ -10,6 +10,7 @@ from math import radians, sin, cos, sqrt, atan2
 import requests
 import telebot
 from telebot import types
+from fastapi import FastAPI, Request, Response
 
 TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
 DB_POSTES = "posteria_optimizada.db"
@@ -30,6 +31,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("cobertura_bot")
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=10)
+
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {"status": "API de Cobertura CR Activa y Corriendo"}
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    if "application/json" in request.headers.get("content-type", ""):
+        json_string = await request.json()
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return Response(status_code=200)
+    else:
+        return Response(status_code=403)
 
 
 # ==========================================
@@ -416,7 +433,19 @@ def recibir_texto(message):
         else:
             bot.reply_to(message, "🤔 No pude reconocer coordenadas en ese mensaje.", parse_mode="HTML")
 
-if __name__ == "__main__":
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     inicializar_bd()
-    logger.info("🚀 Validador 4.1 (Híbrido) iniciado")
-    bot.infinity_polling(skip_pending=True)
+    logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Webhook")
+    # Configurar webhook (opcional, si se quiere automatizar)
+    # bot.remove_webhook()
+    # bot.set_webhook(url="https://your_domain_here/webhook")
+    yield
+
+app.router.lifespan_context = lifespan
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
