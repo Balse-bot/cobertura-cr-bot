@@ -17,8 +17,10 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.patches as patches
 import datetime
+import time
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+WEBHOOK_URL = "https://validador-cr-api.onrender.com/webhook"
 DB_POSTES = "posteria_optimizada.db"
 
 # 🔒 SEGURIDAD: Tu ID personal ya está configurado.
@@ -45,7 +47,8 @@ async def lifespan(app: FastAPI):
     inicializar_desde_zip()
     try:
         bot.remove_webhook()
-        bot.set_webhook(url="https://validador-cr-api.onrender.com/webhook")
+        time.sleep(1)
+        bot.set_webhook(url=WEBHOOK_URL)
         logger.info("✅ Webhook de Telegram registrado exitosamente")
     except Exception as e:
         logger.error(f"❌ Error al registrar el webhook: {e}")
@@ -59,14 +62,13 @@ def read_root():
     return {"status": "API de Cobertura CR Activa y Corriendo"}
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    if "application/json" in request.headers.get("content-type", ""):
-        json_data = await request.json()
-        update = telebot.types.Update.de_json(json_data)
+async def process_webhook(request: Request):
+    if request.headers.get('content-type') == 'application/json':
+        json_string = await request.body()
+        update = telebot.types.Update.de_json(json_string.decode('utf-8'))
         bot.process_new_updates([update])
-        return Response(status_code=200)
-    else:
-        return Response(status_code=403)
+        return {"status": "ok"}
+    return {"status": "error"}
 
 
 # ==========================================
