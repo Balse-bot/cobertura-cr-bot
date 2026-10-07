@@ -36,7 +36,7 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    inicializar_bd()
+    inicializar_desde_zip()
     logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Webhook")
     yield
 
@@ -135,9 +135,24 @@ def inicializar_desde_zip():
     conn.close()
     
     if count == 0:
-        archivos = [f for f in os.listdir('.') if f.endswith('.zip') or f.endswith('.kmz')]
-        if archivos:
-            forzar_reconstruccion_bd(archivos[0])
+        archivos_prioridad = [
+            "Octubre Comercial 2026.kmz",
+            "Huella Data.cr Octubre 2026.kmz"
+        ]
+
+        archivo_cargado = False
+        for archivo in archivos_prioridad:
+            if os.path.exists(archivo):
+                logger.info(f"Cargando archivo prioritario: {archivo}")
+                forzar_reconstruccion_bd(archivo)
+                archivo_cargado = True
+                break
+
+        if not archivo_cargado:
+            archivos = [f for f in os.listdir('.') if f.endswith('.zip') or f.endswith('.kmz')]
+            if archivos:
+                logger.info(f"Cargando archivo secundario: {archivos[0]}")
+                forzar_reconstruccion_bd(archivos[0])
 
 
 # ==========================================
