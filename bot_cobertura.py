@@ -11,6 +11,10 @@ import requests
 import telebot
 from telebot import types
 from fastapi import FastAPI, Request, Response
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import datetime
 
 TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
 DB_POSTES = "posteria_optimizada.db"
@@ -298,25 +302,51 @@ def consultar_cobertura_detallada(lat_user, lon_user):
 # 4. RESPUESTAS E INTERFAZ TELEGRAM
 # ==========================================
 
-def obtener_imagen_mapa(lat, lon):
-    mapbox_token = os.environ.get("MAPBOX_API_KEY")
-    if not mapbox_token:
-        return None
-
-    # Mapbox usa lon,lat (en ese orden)
-    url = (f"https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/"
-           f"pin-s-l+ff0000({lon},{lat})/{lon},{lat},15,0/400x300"
-           f"?access_token={mapbox_token}")
-
+def generar_mapa_tecnico(lat_user, lon_user, res, header_text):
     try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            return io.BytesIO(r.content)
-        else:
-            logger.error(f"Error obteniendo Static Map: HTTP {r.status_code}")
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.set_facecolor('#f0f0f0')
+
+        # Dibujar punto consultado
+        ax.plot(lon_user, lat_user, marker='*', color='red', markersize=15, label='Punto Consultado', zorder=5)
+
+        # Dibujar perímetro de 400m
+        radio_grados = LIMITE_COBERTURA / METROS_POR_GRADO
+        circle = plt.Circle((lon_user, lat_user), radio_grados, color='blue', fill=False, linestyle='--', linewidth=1.5, alpha=0.5, label='Límite 400m')
+        ax.add_patch(circle)
+
+        # Dibujar nodos
+        if res and res.get("encontrado"):
+            nodos = [res["principal"]] + res["siguientes"]
+            lons = [n["lon"] for n in nodos]
+            lats = [n["lat"] for n in nodos]
+            ax.scatter(lons, lats, c='black', s=50, marker='s', zorder=4)
+            for n in nodos:
+                ax.annotate(n["codigo"], (n["lon"], n["lat"]), xytext=(5, 5), textcoords='offset points', fontsize=9, fontweight='bold')
+
+        # Ajustar límites del gráfico para que el círculo siempre se vea bien
+        ax.set_xlim(lon_user - (radio_grados * 1.2), lon_user + (radio_grados * 1.2))
+        ax.set_ylim(lat_user - (radio_grados * 1.2), lat_user + (radio_grados * 1.2))
+
+        # Ocultar ejes
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        # Título superior e inferior
+        fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        ax.set_title(f"{header_text}\nAnálisis Técnico Estructural", fontsize=12, fontweight='bold', pad=10)
+        ax.text(0.5, -0.05, f"Coordenadas: {lat_user:.5f}, {lon_user:.5f} | Fecha: {fecha} | Sello: VALIDADO",
+                ha='center', va='center', transform=ax.transAxes, fontsize=10, bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
+
+        buf = io.BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, format='png', dpi=100)
+        buf.seek(0)
+        plt.close(fig)
+        return buf
     except Exception as e:
-        logger.error(f"Excepción obteniendo Static Map: {e}")
-    return None
+        logger.error(f"Error generando mapa técnico: {e}")
+        return None
 
 def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     res = consultar_cobertura_detallada(lat, lon)
@@ -326,17 +356,18 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
 
     geo = obtener_geodireccion(lat, lon)
 
-    # Intentar enviar la foto del mapa
-    mapa_bytes = obtener_imagen_mapa(lat, lon)
-    foto_enviada_exito = False
-    if mapa_bytes:
-        try:
-            bot.send_photo(chat_id, mapa_bytes, reply_to_message_id=reply_to_message_id)
-            foto_enviada_exito = True
-        except Exception as e:
-            logger.error(f"No se pudo enviar la foto del mapa: {e}")
-
     if not res["encontrado"]:
+        header = "🔴 FUERA DE RED — registrar para expansión"
+        # Intentar enviar la foto del mapa
+        mapa_bytes = generar_mapa_tecnico(lat, lon, res, header)
+        foto_enviada_exito = False
+        if mapa_bytes:
+            try:
+                bot.send_photo(chat_id, mapa_bytes, reply_to_message_id=reply_to_message_id)
+                foto_enviada_exito = True
+            except Exception as e:
+                logger.error(f"No se pudo enviar la foto del mapa: {e}")
+
         tarjeta = (
             f"🔴 <b>FUERA DE RED — registrar para expansión</b>\n\n"
             f"📊 <b>Medición</b>  |  <b>Distancia</b>\n"
@@ -361,11 +392,21 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     d_calle = p["distancia_calle"]
 
     if d_lineal <= UMBRAL_COBERTURA_DIRECTA:
-        header, icon = "🟢 <b>CON COBERTURA — Instalación Directa</b>", "🟢"
+        header, header_text, icon = "🟢 <b>CON COBERTURA — Instalación Directa</b>", "🟢 CON COBERTURA — Instalación Directa", "🟢"
     elif d_lineal <= UMBRAL_AL_BORDE:
-        header, icon = "🟠 <b>AL BORDE — Requiere Estudio</b>", "🟠"
+        header, header_text, icon = "🟠 <b>AL BORDE — Requiere Estudio</b>", "🟠 AL BORDE — Requiere Estudio", "🟠"
     else:
-        header, icon = "🔴 <b>FUERA DE RED — Registrar para expansión</b>", "🔴"
+        header, header_text, icon = "🔴 <b>FUERA DE RED — Registrar para expansión</b>", "🔴 FUERA DE RED — Registrar para expansión", "🔴"
+
+    # Intentar enviar la foto del mapa
+    mapa_bytes = generar_mapa_tecnico(lat, lon, res, header_text)
+    foto_enviada_exito = False
+    if mapa_bytes:
+        try:
+            bot.send_photo(chat_id, mapa_bytes, reply_to_message_id=reply_to_message_id)
+            foto_enviada_exito = True
+        except Exception as e:
+            logger.error(f"No se pudo enviar la foto del mapa: {e}")
 
     s_txt = f"🔌 <b>Al nodo más cercano:</b>\n• <code>{p['codigo']}</code>\n"
     if res["siguientes"]:

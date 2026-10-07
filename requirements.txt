@@ -1,3 +1,4 @@
 pyTelegramBotAPI
 fastapi
 uvicorn
+matplotlib
