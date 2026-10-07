@@ -11,16 +11,22 @@ import requests
 import telebot
 from telebot import types
 from fastapi import FastAPI, Request, Response
+import matplotlib
+matplotlib.use('Agg')
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import matplotlib.patches as patches
+import datetime
 
-TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DB_POSTES = "posteria_optimizada.db"
 
 # 🔒 SEGURIDAD: Tu ID personal ya está configurado.
 ADMINS = [1402264487]  
 
 # Calibración exacta
-UMBRAL_COBERTURA_DIRECTA = 70
-UMBRAL_AL_BORDE = 500
+UMBRAL_COBERTURA_DIRECTA = 400
+UMBRAL_AL_BORDE = 600
 LIMITE_COBERTURA = 400
 
 FACTOR_MAX_RUTA_VS_LINEAL = 4
@@ -32,7 +38,21 @@ logger = logging.getLogger("cobertura_bot")
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=10)
 
-app = FastAPI()
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    inicializar_desde_zip()
+    try:
+        bot.remove_webhook()
+        bot.set_webhook(url="https://validador-cr-api.onrender.com/webhook")
+        logger.info("✅ Webhook de Telegram registrado exitosamente")
+    except Exception as e:
+        logger.error(f"❌ Error al registrar el webhook: {e}")
+    logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Webhook")
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def read_root():
@@ -41,8 +61,8 @@ def read_root():
 @app.post("/webhook")
 async def webhook(request: Request):
     if "application/json" in request.headers.get("content-type", ""):
-        json_string = await request.json()
-        update = telebot.types.Update.de_json(json_string)
+        json_data = await request.json()
+        update = telebot.types.Update.de_json(json_data)
         bot.process_new_updates([update])
         return Response(status_code=200)
     else:
@@ -127,9 +147,24 @@ def inicializar_desde_zip():
     conn.close()
     
     if count == 0:
-        archivos = [f for f in os.listdir('.') if f.endswith('.zip') or f.endswith('.kmz')]
-        if archivos:
-            forzar_reconstruccion_bd(archivos[0])
+        archivos_prioridad = [
+            "Octubre Comercial 2026.kmz",
+            "Huella Data.cr Octubre 2026.kmz"
+        ]
+
+        archivo_cargado = False
+        for archivo in archivos_prioridad:
+            if os.path.exists(archivo):
+                logger.info(f"Cargando archivo prioritario: {archivo}")
+                forzar_reconstruccion_bd(archivo)
+                archivo_cargado = True
+                break
+
+        if not archivo_cargado:
+            archivos = [f for f in os.listdir('.') if f.endswith('.zip') or f.endswith('.kmz')]
+            if archivos:
+                logger.info(f"Cargando archivo secundario: {archivos[0]}")
+                forzar_reconstruccion_bd(archivos[0])
 
 
 # ==========================================
@@ -227,7 +262,8 @@ def consultar_cobertura_detallada(lat_user, lon_user):
         conn.close()
         return {"error": "db_vacia"}
 
-    delta = (UMBRAL_AL_BORDE * 3) / METROS_POR_GRADO
+    # Búsqueda segura hasta 1000m para cubrir la alerta roja
+    delta = 1000 / METROS_POR_GRADO
     c.execute("SELECT codigo, lat, lon FROM postes WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
               (lat_user - delta, lat_user + delta, lon_user - delta, lon_user + delta))
     candidatos = c.fetchall()
@@ -275,6 +311,62 @@ def consultar_cobertura_detallada(lat_user, lon_user):
 # 4. RESPUESTAS E INTERFAZ TELEGRAM
 # ==========================================
 
+def generar_mapa_tecnico(lat_user, lon_user, res, header_text, color_header):
+    try:
+        fig = Figure(figsize=(8, 6))
+        canvas = FigureCanvas(fig)
+        ax = fig.add_subplot(111)
+
+        # Fondo oscuro técnico
+        ax.set_facecolor('#1a1a1a')
+        fig.patch.set_facecolor('#1a1a1a')
+
+        # Dibujar punto consultado con sombra/resalto para simular parpadeo
+        ax.plot(lon_user, lat_user, marker='o', color='white', markersize=18, alpha=0.3, zorder=4)
+        ax.plot(lon_user, lat_user, marker='*', color='red', markersize=15, label='Punto Consultado', zorder=5)
+
+        # Dibujar perímetro de 400m
+        radio_grados = LIMITE_COBERTURA / METROS_POR_GRADO
+        circle = patches.Circle((lon_user, lat_user), radio_grados, color='cyan', fill=False, linestyle='--', linewidth=1.5, alpha=0.7, label='Límite 400m')
+        ax.add_patch(circle)
+
+        # Dibujar nodos
+        if res and res.get("encontrado"):
+            nodos = [res["principal"]] + res["siguientes"]
+            lons = [n["lon"] for n in nodos]
+            lats = [n["lat"] for n in nodos]
+            ax.scatter(lons, lats, c='#00ff00', s=50, marker='s', zorder=4, edgecolors='black')
+            for n in nodos:
+                ax.annotate(n["codigo"], (n["lon"], n["lat"]), xytext=(5, 5), textcoords='offset points',
+                            fontsize=9, fontweight='bold', color='white',
+                            bbox=dict(boxstyle="round,pad=0.3", fc="#333333", ec="none", alpha=0.7))
+
+        # Ajustar límites del gráfico para que el círculo siempre se vea bien
+        ax.set_xlim(lon_user - (radio_grados * 1.5), lon_user + (radio_grados * 1.5))
+        ax.set_ylim(lat_user - (radio_grados * 1.5), lat_user + (radio_grados * 1.5))
+
+        # Ocultar ejes
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        # Título superior e inferior
+        fecha = datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p")
+        ax.set_title(header_text, fontsize=12, fontweight='bold', pad=15, color='white',
+                     bbox=dict(facecolor=color_header, alpha=0.8, edgecolor='none', pad=5, boxstyle="square,pad=0.5"))
+
+        ax.text(0.5, -0.05, f"Coordenadas: {lat_user:.5f}, {lon_user:.5f} | Fecha: {fecha} | Validador ADN",
+                ha='center', va='center', transform=ax.transAxes, fontsize=10, color='white',
+                bbox=dict(facecolor='#333333', alpha=0.8, edgecolor='none'))
+
+        buf = io.BytesIO()
+        fig.tight_layout()
+        fig.savefig(buf, format='png', dpi=100)
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        logger.error(f"Error generando mapa técnico: {e}")
+        return None
+
 def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     res = consultar_cobertura_detallada(lat, lon)
     if res and res.get("error"):
@@ -284,6 +376,17 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     geo = obtener_geodireccion(lat, lon)
 
     if not res["encontrado"]:
+        header_text = "🔴 FUERA DE RED | Sin tendido cercano (límite 400 m)"
+        # Intentar enviar la foto del mapa
+        mapa_bytes = generar_mapa_tecnico(lat, lon, res, header_text, "red")
+        foto_enviada_exito = False
+        if mapa_bytes:
+            try:
+                bot.send_photo(chat_id, mapa_bytes, reply_to_message_id=reply_to_message_id)
+                foto_enviada_exito = True
+            except Exception as e:
+                logger.error(f"No se pudo enviar la foto del mapa: {e}")
+
         tarjeta = (
             f"🔴 <b>FUERA DE RED — registrar para expansión</b>\n\n"
             f"📊 <b>Medición</b>  |  <b>Distancia</b>\n"
@@ -298,7 +401,9 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
             f"• Barrio: {geo['barrio']}\n"
             f"• Vía: {geo['direccion']}"
         )
-        bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_to_message_id=reply_to_message_id)
+        # Si ya enviamos foto, no hace falta usar reply_to en el texto para no saturar
+        reply_to = None if foto_enviada_exito else reply_to_message_id
+        bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_to_message_id=reply_to)
         return
 
     p = res["principal"]
@@ -306,11 +411,21 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     d_calle = p["distancia_calle"]
 
     if d_lineal <= UMBRAL_COBERTURA_DIRECTA:
-        header, icon = "🟢 <b>CON COBERTURA — Instalación Directa</b>", "🟢"
+        header, header_text, icon, color = "🟢 <b>RED AL FRENTE</b>", f"🟢 RED AL FRENTE | {int(d_lineal)} m al tendido (límite 400 m)", "🟢", "green"
     elif d_lineal <= UMBRAL_AL_BORDE:
-        header, icon = "🟠 <b>AL BORDE — Requiere Estudio</b>", "🟠"
+        header, header_text, icon, color = "🟠 <b>AL BORDE DEL RANGO</b>", f"🟠 AL BORDE DEL RANGO | {int(d_lineal)} m al tendido (límite 400 m)", "🟠", "orange"
     else:
-        header, icon = "🔴 <b>FUERA DE RED — Registrar para expansión</b>", "🔴"
+        header, header_text, icon, color = "🔴 <b>FUERA DE RED</b>", f"🔴 FUERA DE RED | {int(d_lineal)} m al tendido (límite 400 m)", "🔴", "red"
+
+    # Intentar enviar la foto del mapa
+    mapa_bytes = generar_mapa_tecnico(lat, lon, res, header_text, color)
+    foto_enviada_exito = False
+    if mapa_bytes:
+        try:
+            bot.send_photo(chat_id, mapa_bytes, reply_to_message_id=reply_to_message_id)
+            foto_enviada_exito = True
+        except Exception as e:
+            logger.error(f"No se pudo enviar la foto del mapa: {e}")
 
     s_txt = f"🔌 <b>Al nodo más cercano:</b>\n• <code>{p['codigo']}</code>\n"
     if res["siguientes"]:
@@ -337,7 +452,8 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     )
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🗺 Ver ruta al NAP en Google Maps", url=link))
-    bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup, reply_to_message_id=reply_to_message_id)
+    reply_to = None if foto_enviada_exito else reply_to_message_id
+    bot.send_message(chat_id, tarjeta, parse_mode="HTML", reply_markup=markup, reply_to_message_id=reply_to)
 
 def responder_multiconsulta(chat_id, lista_coords, reply_to_message_id):
     bot.send_message(chat_id, f"⏳ Evaluando lote de {len(lista_coords)} ubicaciones. Calculando rutas...", reply_to_message_id=reply_to_message_id)
@@ -355,7 +471,7 @@ def responder_multiconsulta(chat_id, lista_coords, reply_to_message_id):
         else:
             p = res["principal"]
             d = p["distancia_lineal"]
-            if d <= UMBRAL_COBERTURA_DIRECTA: estado = f"🟢 CON COBERT ({int(d)}m)"
+            if d <= UMBRAL_COBERTURA_DIRECTA: estado = f"🟢 RED AL FRENTE ({int(d)}m)"
             elif d <= UMBRAL_AL_BORDE: estado = f"🟠 AL BORDE ({int(d)}m)"
             else: estado = f"🔴 FUERA DE RED ({int(d)}m)"
             
@@ -432,19 +548,6 @@ def recibir_texto(message):
             responder_consulta_individual(message.chat.id, lat, lon, message.message_id)
         else:
             bot.reply_to(message, "🤔 No pude reconocer coordenadas en ese mensaje.", parse_mode="HTML")
-
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    inicializar_bd()
-    logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Webhook")
-    # Configurar webhook (opcional, si se quiere automatizar)
-    # bot.remove_webhook()
-    # bot.set_webhook(url="https://your_domain_here/webhook")
-    yield
-
-app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
     import uvicorn
