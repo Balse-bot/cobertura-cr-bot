@@ -10,7 +10,6 @@ from math import radians, sin, cos, sqrt, atan2
 import requests
 import telebot
 from telebot import types
-from fastapi import FastAPI, Request, Response
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib.figure import Figure
@@ -20,7 +19,6 @@ import datetime
 import time
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = "https://validador-cr-api.onrender.com/webhook"
 DB_POSTES = "posteria_optimizada.db"
 
 # 🔒 SEGURIDAD: Tu ID personal ya está configurado.
@@ -39,37 +37,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("cobertura_bot")
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=10)
-
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    inicializar_desde_zip()
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-        bot.set_webhook(url=WEBHOOK_URL)
-        logger.info("✅ Webhook de Telegram registrado exitosamente")
-    except Exception as e:
-        logger.error(f"❌ Error al registrar el webhook: {e}")
-    logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Webhook")
-    yield
-
-app = FastAPI(lifespan=lifespan)
-
-@app.get("/")
-def read_root():
-    return {"status": "API de Cobertura CR Activa y Corriendo"}
-
-@app.post("/webhook")
-async def process_webhook(request: Request):
-    if request.headers.get('content-type') == 'application/json':
-        json_string = await request.body()
-        update = telebot.types.Update.de_json(json_string.decode('utf-8'))
-        bot.process_new_updates([update])
-        return {"status": "ok"}
-    return {"status": "error"}
-
 
 # ==========================================
 # 1. INICIALIZACIÓN DE BASE DE DATOS Y CACHÉ
@@ -552,5 +519,11 @@ def recibir_texto(message):
             bot.reply_to(message, "🤔 No pude reconocer coordenadas en ese mensaje.", parse_mode="HTML")
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    inicializar_desde_zip()
+    logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Polling")
+    try:
+        bot.remove_webhook()
+        time.sleep(1)
+    except Exception as e:
+        pass
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
