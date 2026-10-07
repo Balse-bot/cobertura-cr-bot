@@ -43,6 +43,12 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     inicializar_desde_zip()
+    try:
+        bot.remove_webhook()
+        bot.set_webhook(url="https://validador-cr-api.onrender.com/webhook")
+        logger.info("✅ Webhook de Telegram registrado exitosamente")
+    except Exception as e:
+        logger.error(f"❌ Error al registrar el webhook: {e}")
     logger.info("🚀 Validador 4.1 (Híbrido) iniciado en modo Webhook")
     yield
 
