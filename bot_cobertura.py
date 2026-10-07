@@ -13,7 +13,9 @@ from telebot import types
 from fastapi import FastAPI, Request, Response
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import matplotlib.patches as patches
 import datetime
 
 TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
@@ -23,8 +25,8 @@ DB_POSTES = "posteria_optimizada.db"
 ADMINS = [1402264487]  
 
 # Calibración exacta
-UMBRAL_COBERTURA_DIRECTA = 70
-UMBRAL_AL_BORDE = 500
+UMBRAL_COBERTURA_DIRECTA = 400
+UMBRAL_AL_BORDE = 600
 LIMITE_COBERTURA = 400
 
 FACTOR_MAX_RUTA_VS_LINEAL = 4
@@ -53,8 +55,8 @@ def read_root():
 @app.post("/webhook")
 async def webhook(request: Request):
     if "application/json" in request.headers.get("content-type", ""):
-        json_string = await request.json()
-        update = telebot.types.Update.de_json(json_string)
+        json_data = await request.json()
+        update = telebot.types.Update.de_json(json_data)
         bot.process_new_updates([update])
         return Response(status_code=200)
     else:
@@ -254,7 +256,8 @@ def consultar_cobertura_detallada(lat_user, lon_user):
         conn.close()
         return {"error": "db_vacia"}
 
-    delta = (UMBRAL_AL_BORDE * 3) / METROS_POR_GRADO
+    # Búsqueda segura hasta 1000m para cubrir la alerta roja
+    delta = 1000 / METROS_POR_GRADO
     c.execute("SELECT codigo, lat, lon FROM postes WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
               (lat_user - delta, lat_user + delta, lon_user - delta, lon_user + delta))
     candidatos = c.fetchall()
@@ -302,17 +305,23 @@ def consultar_cobertura_detallada(lat_user, lon_user):
 # 4. RESPUESTAS E INTERFAZ TELEGRAM
 # ==========================================
 
-def generar_mapa_tecnico(lat_user, lon_user, res, header_text):
+def generar_mapa_tecnico(lat_user, lon_user, res, header_text, color_header):
     try:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.set_facecolor('#f0f0f0')
+        fig = Figure(figsize=(8, 6))
+        canvas = FigureCanvas(fig)
+        ax = fig.add_subplot(111)
 
-        # Dibujar punto consultado
+        # Fondo oscuro técnico
+        ax.set_facecolor('#1a1a1a')
+        fig.patch.set_facecolor('#1a1a1a')
+
+        # Dibujar punto consultado con sombra/resalto para simular parpadeo
+        ax.plot(lon_user, lat_user, marker='o', color='white', markersize=18, alpha=0.3, zorder=4)
         ax.plot(lon_user, lat_user, marker='*', color='red', markersize=15, label='Punto Consultado', zorder=5)
 
         # Dibujar perímetro de 400m
         radio_grados = LIMITE_COBERTURA / METROS_POR_GRADO
-        circle = plt.Circle((lon_user, lat_user), radio_grados, color='blue', fill=False, linestyle='--', linewidth=1.5, alpha=0.5, label='Límite 400m')
+        circle = patches.Circle((lon_user, lat_user), radio_grados, color='cyan', fill=False, linestyle='--', linewidth=1.5, alpha=0.7, label='Límite 400m')
         ax.add_patch(circle)
 
         # Dibujar nodos
@@ -320,29 +329,33 @@ def generar_mapa_tecnico(lat_user, lon_user, res, header_text):
             nodos = [res["principal"]] + res["siguientes"]
             lons = [n["lon"] for n in nodos]
             lats = [n["lat"] for n in nodos]
-            ax.scatter(lons, lats, c='black', s=50, marker='s', zorder=4)
+            ax.scatter(lons, lats, c='#00ff00', s=50, marker='s', zorder=4, edgecolors='black')
             for n in nodos:
-                ax.annotate(n["codigo"], (n["lon"], n["lat"]), xytext=(5, 5), textcoords='offset points', fontsize=9, fontweight='bold')
+                ax.annotate(n["codigo"], (n["lon"], n["lat"]), xytext=(5, 5), textcoords='offset points',
+                            fontsize=9, fontweight='bold', color='white',
+                            bbox=dict(boxstyle="round,pad=0.3", fc="#333333", ec="none", alpha=0.7))
 
         # Ajustar límites del gráfico para que el círculo siempre se vea bien
-        ax.set_xlim(lon_user - (radio_grados * 1.2), lon_user + (radio_grados * 1.2))
-        ax.set_ylim(lat_user - (radio_grados * 1.2), lat_user + (radio_grados * 1.2))
+        ax.set_xlim(lon_user - (radio_grados * 1.5), lon_user + (radio_grados * 1.5))
+        ax.set_ylim(lat_user - (radio_grados * 1.5), lat_user + (radio_grados * 1.5))
 
         # Ocultar ejes
         ax.set_xticks([])
         ax.set_yticks([])
 
         # Título superior e inferior
-        fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        ax.set_title(f"{header_text}\nAnálisis Técnico Estructural", fontsize=12, fontweight='bold', pad=10)
-        ax.text(0.5, -0.05, f"Coordenadas: {lat_user:.5f}, {lon_user:.5f} | Fecha: {fecha} | Sello: VALIDADO",
-                ha='center', va='center', transform=ax.transAxes, fontsize=10, bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
+        fecha = datetime.datetime.now().strftime("%d/%m/%Y %I:%M %p")
+        ax.set_title(header_text, fontsize=12, fontweight='bold', pad=15, color='white',
+                     bbox=dict(facecolor=color_header, alpha=0.8, edgecolor='none', pad=5, boxstyle="square,pad=0.5"))
+
+        ax.text(0.5, -0.05, f"Coordenadas: {lat_user:.5f}, {lon_user:.5f} | Fecha: {fecha} | Validador ADN",
+                ha='center', va='center', transform=ax.transAxes, fontsize=10, color='white',
+                bbox=dict(facecolor='#333333', alpha=0.8, edgecolor='none'))
 
         buf = io.BytesIO()
-        plt.tight_layout()
-        plt.savefig(buf, format='png', dpi=100)
+        fig.tight_layout()
+        fig.savefig(buf, format='png', dpi=100)
         buf.seek(0)
-        plt.close(fig)
         return buf
     except Exception as e:
         logger.error(f"Error generando mapa técnico: {e}")
@@ -357,9 +370,9 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     geo = obtener_geodireccion(lat, lon)
 
     if not res["encontrado"]:
-        header = "🔴 FUERA DE RED — registrar para expansión"
+        header_text = "🔴 FUERA DE RED | Sin tendido cercano (límite 400 m)"
         # Intentar enviar la foto del mapa
-        mapa_bytes = generar_mapa_tecnico(lat, lon, res, header)
+        mapa_bytes = generar_mapa_tecnico(lat, lon, res, header_text, "red")
         foto_enviada_exito = False
         if mapa_bytes:
             try:
@@ -392,14 +405,14 @@ def responder_consulta_individual(chat_id, lat, lon, reply_to_message_id):
     d_calle = p["distancia_calle"]
 
     if d_lineal <= UMBRAL_COBERTURA_DIRECTA:
-        header, header_text, icon = "🟢 <b>CON COBERTURA — Instalación Directa</b>", "🟢 CON COBERTURA — Instalación Directa", "🟢"
+        header, header_text, icon, color = "🟢 <b>RED AL FRENTE</b>", f"🟢 RED AL FRENTE | {int(d_lineal)} m al tendido (límite 400 m)", "🟢", "green"
     elif d_lineal <= UMBRAL_AL_BORDE:
-        header, header_text, icon = "🟠 <b>AL BORDE — Requiere Estudio</b>", "🟠 AL BORDE — Requiere Estudio", "🟠"
+        header, header_text, icon, color = "🟠 <b>AL BORDE DEL RANGO</b>", f"🟠 AL BORDE DEL RANGO | {int(d_lineal)} m al tendido (límite 400 m)", "🟠", "orange"
     else:
-        header, header_text, icon = "🔴 <b>FUERA DE RED — Registrar para expansión</b>", "🔴 FUERA DE RED — Registrar para expansión", "🔴"
+        header, header_text, icon, color = "🔴 <b>FUERA DE RED</b>", f"🔴 FUERA DE RED | {int(d_lineal)} m al tendido (límite 400 m)", "🔴", "red"
 
     # Intentar enviar la foto del mapa
-    mapa_bytes = generar_mapa_tecnico(lat, lon, res, header_text)
+    mapa_bytes = generar_mapa_tecnico(lat, lon, res, header_text, color)
     foto_enviada_exito = False
     if mapa_bytes:
         try:
@@ -452,7 +465,7 @@ def responder_multiconsulta(chat_id, lista_coords, reply_to_message_id):
         else:
             p = res["principal"]
             d = p["distancia_lineal"]
-            if d <= UMBRAL_COBERTURA_DIRECTA: estado = f"🟢 CON COBERT ({int(d)}m)"
+            if d <= UMBRAL_COBERTURA_DIRECTA: estado = f"🟢 RED AL FRENTE ({int(d)}m)"
             elif d <= UMBRAL_AL_BORDE: estado = f"🟠 AL BORDE ({int(d)}m)"
             else: estado = f"🔴 FUERA DE RED ({int(d)}m)"
             
