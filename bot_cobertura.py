@@ -18,7 +18,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.patches as patches
 import datetime
 
-TOKEN = "8621312939:AAHQjsKsDUkedKEKzD1HmJyJ0q4S7Qu2NnA"
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DB_POSTES = "posteria_optimizada.db"
 
 # 🔒 SEGURIDAD: Tu ID personal ya está configurado.
